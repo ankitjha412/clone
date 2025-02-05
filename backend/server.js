@@ -4,14 +4,18 @@ const path = require("path");
 const whois = require("whois");
 const cors = require("cors");
 const readline = require("readline");
+const stringSimilarity = require("string-similarity");
+const compression = require("compression");
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cors());
+app.use(compression());
 
 const csvFilePath = path.join(__dirname, "urls.csv");
 let storedDomains = new Set();
+const whoisCache = new Map(); // Cache for WHOIS data
 
 // ** Extracts the Main Domain from a URL **
 const extractMainDomain = (inputUrl) => {
@@ -66,45 +70,33 @@ const loadDomains = async () => {
   });
 };
 
-// ** WHOIS Lookup **
-const getWhoisData = async (domain) => {
+// ** WHOIS Lookup with Caching **
+const getCachedWhoisData = async (domain) => {
+  if (whoisCache.has(domain)) {
+    return whoisCache.get(domain);
+  }
+
   return new Promise((resolve) => {
     try {
-      whois.lookup(domain, { timeout: 5000 }, (err, data) => {
+      whois.lookup(domain, { timeout: 3000 }, (err, data) => {
         if (err) {
           console.error(`❌ WHOIS lookup failed for ${domain}:`, err);
-          resolve("WHOIS data unavailable due to server error.");
+          const fallbackData = "WHOIS lookup failed.";
+          whoisCache.set(domain, fallbackData);
+          resolve(fallbackData);
         } else {
-          resolve(data || "No WHOIS data found.");
+          const result = data || "No WHOIS data found.";
+          whoisCache.set(domain, result);
+          resolve(result);
         }
       });
     } catch (error) {
       console.error(`❌ WHOIS error for ${domain}:`, error);
-      resolve("WHOIS data unavailable.");
+      const fallbackData = "WHOIS data unavailable.";
+      whoisCache.set(domain, fallbackData);
+      resolve(fallbackData);
     }
   });
-};
-
-// ** Levenshtein Distance Algorithm (Measures Similarity) **
-const levenshteinDistance = (a, b) => {
-  if (a.length === 0) return b.length;
-  if (b.length === 0) return a.length;
-
-  const matrix = [];
-  for (let i = 0; i <= b.length; i++) matrix[i] = [i];
-  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
-
-  for (let i = 1; i <= b.length; i++) {
-    for (let j = 1; j <= a.length; j++) {
-      if (b.charAt(i - 1) === a.charAt(j - 1)) {
-        matrix[i][j] = matrix[i - 1][j - 1];
-      } else {
-        matrix[i][j] = Math.min(matrix[i - 1][j - 1] + 1, Math.min(matrix[i][j - 1] + 1, matrix[i - 1][j] + 1));
-      }
-    }
-  }
-
-  return (1 - matrix[b.length][a.length] / Math.max(a.length, b.length)) * 100;
 };
 
 // ** API Endpoint to Check a Suspect URL **
@@ -139,16 +131,17 @@ app.post("/check-clone", async (req, res) => {
       });
     }
 
-    // Check for similar-looking domains
+    // Check for similar-looking domains using string similarity
     for (let storedDomain of storedDomains) {
-      let similarity = levenshteinDistance(suspect_domain, storedDomain);
+      const similarity = stringSimilarity.compareTwoStrings(suspect_domain, storedDomain) * 100;
       if (similarity > highestSimilarity) {
         highestSimilarity = similarity;
         bestMatchDomain = storedDomain;
       }
     }
 
-    const whoisData = await getWhoisData(suspect_domain);
+    // Only perform WHOIS lookup if similarity is high
+    const whoisData = highestSimilarity > 80 ? await getCachedWhoisData(suspect_domain) : "WHOIS lookup skipped due to low similarity.";
 
     res.json({
       suspect_url,
